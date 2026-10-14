@@ -21,15 +21,46 @@ BAUD_RATE = 115200          # must match Serial.begin() on the ESP32
 LHM_URL = "http://localhost:8085/data.json"
 POLL_INTERVAL = 1.0         # seconds between updates
 
-# (text substring to match, category substring to match)
-# Run with --discover to see real names/categories for your hardware and adjust.
-# Intel example: "CPU Package" / AMD example: "CPU (Tctl/Tdie)" or "Core (Tctl/Tdie)"
+VERBOSE = "--verbose" in sys.argv
+
+# Candidatos por chave, testados na ordem até um retornar valor numérico.
+#
+# Formatos aceitos por candidato:
+#   ("nome", "categoria")
+#   ("nome", "categoria", ["token1", "token2"])             # exige TODOS no path
+#   ("nome", "categoria", ["token1"], ["token2", "token3"]) # exige uns, exclui outros
+#
+# O matching é por substring (case-insensitive). A "categoria" é buscada no path
+# inteiro, então "Temperature" casa com a pasta "Temperatures" do LHM.
 SENSOR_NAMES = {
-    "cpu_temp":  ("CPU Package", "Temperature"),
-    "cpu_usage": ("CPU Total",   "Load"),
-    "gpu_temp":  ("GPU Core",    "Temperature"),
-    "gpu_usage": ("GPU Core",    "Load"),
-    "ram_usage": ("Memory",      "Load"),
+    "cpu_temp": [
+        ("CPU Package",       "Temperature"),  # Intel 2ª..14ª geração
+        ("CPU (Tctl/Tdie)",   "Temperature"),  # AMD Ryzen
+        ("CPU CCD1 (Tdie)",   "Temperature"),  # AMD Ryzen (por CCD)
+        ("CPU Die (average)", "Temperature"),  # AMD Ryzen mais novos
+        ("Core Average",      "Temperature"),  # fallback genérico
+    ],
+    "cpu_usage": [
+        ("CPU Total", "Load"),
+    ],
+    "gpu_temp": [
+        ("GPU Core",       "Temperature", ["NVIDIA"]),  # dGPU NVIDIA
+        ("GPU Core",       "Temperature", ["AMD"]),     # dGPU AMD
+        ("GPU Hot Spot",   "Temperature", ["AMD"]),     # RDNA hotspot
+        ("GPU Core",       "Temperature", ["Intel"]),   # iGPU Intel
+        ("GPU Temperature","Temperature", ["Intel"]),
+        ("GPU Core",       "Temperature"),              # fallback (1ª GPU)
+    ],
+    "gpu_usage": [
+        ("GPU Core", "Load", ["NVIDIA"]),
+        ("GPU Core", "Load", ["AMD"]),
+        ("GPU D3D",  "Load", ["Intel"]),
+        ("GPU Core", "Load"),                            # fallback
+    ],
+    "ram_usage": [
+        ("Memory",          "Load"),
+        ("Physical Memory", "Load"),
+    ],
 }
 
 # Known USB vendor:product IDs for common ESP32 dev boards.
@@ -43,6 +74,8 @@ KNOWN_VID_PID = {
 KNOWN_DESC_KEYWORDS = ["CP210", "CH340", "CH9102", "USB-SERIAL", "USB JTAG", "SILICON LABS"]
 # -----------------------------------------
 
+
+# ---------- LHM helpers ----------
 
 def flatten(node, path=None, out=None):
     """Recursively flatten the LHM JSON tree into a list of leaf sensors."""
@@ -77,16 +110,52 @@ def discover():
           "'Temperatures'/'Load') into SENSOR_NAMES in this script.")
 
 
-def find_value(sensors, name_sub, category_sub):
-    name_sub, category_sub = name_sub.lower(), category_sub.lower()
+def find_value(sensors, name_sub, category_sub, path_include=None, path_exclude=None):
+    """Retorna o valor do primeiro sensor que bate em nome + categoria + filtros de path."""
+    name_sub = name_sub.lower()
+    category_sub = category_sub.lower()
+    path_include = [t.lower() for t in (path_include or [])]
+    path_exclude = [t.lower() for t in (path_exclude or [])]
+
     for s in sensors:
         path_str = " ".join(s["path"]).lower()
-        if name_sub in s["text"].lower() and category_sub in path_str:
-            return s["value"]
+        if name_sub not in s["text"].lower():
+            continue
+        if category_sub not in path_str:
+            continue
+        if path_include and not all(t in path_str for t in path_include):
+            continue
+        if path_exclude and any(t in path_str for t in path_exclude):
+            continue
+        return s["value"]
     return None
 
 
+# ---------- Valor numérico ----------
+
+_NON_NUMERIC_TOKENS = {"-", "--", "n/a", "na", "n.a.", "null", "none", ""}
+
+
+def is_numeric(raw):
+    """True se a string bruta pode virar um float útil."""
+    if raw is None:
+        return False
+    s = str(raw).strip()
+    if s.lower() in _NON_NUMERIC_TOKENS:
+        return False
+    cleaned = s.replace(",", ".")
+    num = "".join(c for c in cleaned if c.isdigit() or c in ".-")
+    if not num or num in (".", "-", "-.", ".-"):
+        return False
+    try:
+        float(num)
+        return True
+    except ValueError:
+        return False
+
+
 def parse_number(raw):
+    """Converte string bruta em float. None/ inválido -> 0.0."""
     if raw is None:
         return 0.0
     raw = str(raw).replace(",", ".")
@@ -96,6 +165,67 @@ def parse_number(raw):
     except ValueError:
         return 0.0
 
+
+# ---------- Resolução de candidatos ----------
+
+def normalize_sensor_config(cfg):
+    """Aceita o formato antigo (tupla) e o novo (lista de tuplas)."""
+    out = {}
+    for k, v in cfg.items():
+        if isinstance(v, tuple):
+            out[k] = [v]
+        else:
+            out[k] = list(v)
+    return out
+
+
+def normalize_candidate(c):
+    """Aceita tuplas de 2, 3 ou 4 elementos. Retorna (name, cat, include, exclude)."""
+    c = tuple(c)
+    if len(c) == 2:
+        return (c[0], c[1], [], [])
+    if len(c) == 3:
+        return (c[0], c[1], list(c[2]), [])
+    if len(c) == 4:
+        return (c[0], c[1], list(c[2]), list(c[3]))
+    raise ValueError(f"Candidato inválido: {c!r}")
+
+
+def resolve_sensor(sensors, key, candidates, cache, verbose=False):
+    """
+    Tenta o candidato cacheado primeiro; se falhar OU retornar valor não-numérico,
+    invalida o cache e testa todos em ordem.
+    Só cacheia candidatos que retornaram valor numérico.
+
+    Retorna (raw_value_ou_None, idx_usado_ou_-1).
+    """
+    cached = cache.get(key)
+
+    if cached is not None and 0 <= cached < len(candidates):
+        name_sub, cat_sub, inc, exc = normalize_candidate(candidates[cached])
+        v = find_value(sensors, name_sub, cat_sub, inc, exc)
+        if v is not None and is_numeric(v):
+            return v, cached
+        if verbose:
+            print(f"[sensor] {key}: cache #{cached} parou de responder "
+                  f"({name_sub!r}/{cat_sub!r}) - reprocessando")
+        cache.pop(key, None)
+
+    for i, c in enumerate(candidates):
+        name_sub, cat_sub, inc, exc = normalize_candidate(c)
+        v = find_value(sensors, name_sub, cat_sub, inc, exc)
+        if v is not None and is_numeric(v):
+            cache[key] = i
+            if verbose:
+                extra = f" inc={inc}" if inc else ""
+                extra += f" exc={exc}" if exc else ""
+                print(f"[sensor] {key} -> #{i} {name_sub!r}/{cat_sub!r}{extra} = {v}")
+            return v, i
+
+    return None, -1
+
+
+# ---------- Serial ----------
 
 def find_esp32_port():
     """Auto-detect the ESP32's COM port and fall back to the first available candidate."""
@@ -125,7 +255,12 @@ def find_esp32_port():
     return first_port.device
 
 
-def resolve_port():
+def resolve_port(port_selection=None):
+    if port_selection is not None:
+        selected = port_selection["port"]
+        if selected != "AUTO":
+            return selected
+        return find_esp32_port()
     if "--port" in sys.argv:
         idx = sys.argv.index("--port")
         return sys.argv[idx + 1]
@@ -133,6 +268,8 @@ def resolve_port():
         return SERIAL_PORT
     return find_esp32_port()
 
+
+# ---------- Tray icon ----------
 
 def should_use_tray():
     if "--no-tray" in sys.argv:
@@ -142,7 +279,7 @@ def should_use_tray():
     return bool(getattr(sys, "frozen", False))
 
 
-def create_tray_icon(stop_event):
+def create_tray_icon(stop_event, port_selection, reconnect_event):
     if pystray is None or Image is None:
         print("pystray/pillow not installed; install with: python -m pip install pystray pillow")
         return None
@@ -166,7 +303,35 @@ def create_tray_icon(stop_event):
 
     def quit_action(icon, _item):
         stop_event.set()
+        reconnect_event.set()
         icon.stop()
+
+    def select_port(port):
+        def action(_icon, _item):
+            port_selection["port"] = port
+            reconnect_event.set()
+        return action
+
+    def port_menu_items():
+        items = [pystray.MenuItem(
+            "Auto-detect",
+            select_port("AUTO"),
+            checked=lambda _item: port_selection["port"] == "AUTO",
+            radio=True,
+        )]
+        ports = list(list_ports.comports())
+        for port in ports:
+            description = port.description or ""
+            label = f"{port.device} - {description}" if description else port.device
+            items.append(pystray.MenuItem(
+                label,
+                select_port(port.device),
+                checked=lambda _item, device=port.device: port_selection["port"] == device,
+                radio=True,
+            ))
+        if not ports:
+            items.append(pystray.MenuItem("No serial ports found", None, enabled=False))
+        return items
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     icon_path = os.path.join(base_dir, "icons", "ok.ico")
@@ -179,6 +344,7 @@ def create_tray_icon(stop_event):
         menu=pystray.Menu(
             pystray.MenuItem("ESP32 Monitor", lambda: None),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Serial Port", pystray.Menu(lambda: port_menu_items())),
             pystray.MenuItem("Quit", quit_action),
         ),
     )
@@ -205,19 +371,36 @@ def set_tray_state(icon, state):
     icon.title = f"ESP32 Monitor - {state.title()}"
 
 
-def monitor_loop(port, stop_event, tray_icon=None):
+# ---------- Monitor loop ----------
+
+def monitor_loop(port, stop_event, tray_icon=None, port_selection=None, reconnect_event=None):
     ser = None
     state = "warning"
 
+    sensor_cfg = normalize_sensor_config(SENSOR_NAMES)
+    resolved_cache = {}   # {"cpu_temp": 0, "gpu_temp": 0, ...}
+
     print("Streaming data. Ctrl+C to stop.")
+    if VERBOSE:
+        print(f"[cfg] {len(sensor_cfg)} chaves, "
+              f"{sum(len(v) for v in sensor_cfg.values())} candidatos no total")
     if tray_icon is not None:
         set_tray_state(tray_icon, state)
 
     try:
         while not stop_event.is_set():
+            if reconnect_event is not None and reconnect_event.is_set():
+                reconnect_event.clear()
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+                    ser = None
+
             if ser is None or not ser.is_open:
                 try:
-                    port = resolve_port()
+                    port = resolve_port(port_selection)
                     ser = serial.Serial(port, BAUD_RATE, timeout=1)
                     time.sleep(2)
                     print(f"Opened serial port {port} @ {BAUD_RATE}")
@@ -232,20 +415,45 @@ def monitor_loop(port, stop_event, tray_icon=None):
                         ser = None
                     if tray_icon is not None:
                         set_tray_state(tray_icon, "error")
-                    if stop_event.wait(5):
+                    if reconnect_event is not None:
+                        reconnect_event.wait(5)
+                    else:
+                        stop_event.wait(5)
+                    if stop_event.is_set():
                         break
                     continue
 
             try:
                 sensors = get_sensors()
-                vals = {k: parse_number(find_value(sensors, *v)) for k, v in SENSOR_NAMES.items()}
+
+                vals = {}
+                missing = []
+                for key, candidates in sensor_cfg.items():
+                    raw, idx = resolve_sensor(
+                        sensors, key, candidates, resolved_cache, verbose=VERBOSE
+                    )
+                    if raw is None:
+                        missing.append(key)
+                    vals[key] = parse_number(raw)
+
+                # Garante que todas as chaves existem no dict (mesmo que 0.0)
+                for key in ("cpu_temp", "cpu_usage", "gpu_temp", "gpu_usage", "ram_usage"):
+                    vals.setdefault(key, 0.0)
 
                 line = (f"{vals['cpu_temp']:.1f},{vals['cpu_usage']:.1f},"
                         f"{vals['gpu_temp']:.1f},{vals['gpu_usage']:.1f},"
                         f"{vals['ram_usage']:.1f}\n")
                 ser.write(line.encode("utf-8"))
                 print(line.strip())
-                state = "ok"
+
+                # Estado do tray: erro se faltar sensor crítico, warning se algum faltar,
+                # ok caso contrário.
+                if missing:
+                    state = "warning"
+                    if VERBOSE:
+                        print(f"[sensor] faltando: {missing}")
+                else:
+                    state = "ok"
 
             except serial.SerialException as e:
                 print(f"Serial port error: {e}")
@@ -262,7 +470,11 @@ def monitor_loop(port, stop_event, tray_icon=None):
             if tray_icon is not None:
                 set_tray_state(tray_icon, state)
 
-            if stop_event.wait(POLL_INTERVAL):
+            if reconnect_event is not None:
+                reconnect_event.wait(POLL_INTERVAL)
+                if stop_event.is_set():
+                    break
+            elif stop_event.wait(POLL_INTERVAL):
                 break
     except KeyboardInterrupt:
         print("\nStopping.")
@@ -275,23 +487,37 @@ def monitor_loop(port, stop_event, tray_icon=None):
         print("Monitor stopped.")
 
 
+# ---------- Entrypoint ----------
+
 def main():
     if "--discover" in sys.argv:
         discover()
         return
 
     stop_event = Event()
+    reconnect_event = Event()
+    selected_port = "AUTO"
+    if "--port" in sys.argv:
+        selected_port = sys.argv[sys.argv.index("--port") + 1]
+    elif SERIAL_PORT != "AUTO":
+        selected_port = SERIAL_PORT
+    port_selection = {"port": selected_port}
 
     if should_use_tray():
-        tray_icon = create_tray_icon(stop_event)
+        tray_icon = create_tray_icon(stop_event, port_selection, reconnect_event)
         if tray_icon is not None:
-            worker = Thread(target=monitor_loop, args=(None, stop_event, tray_icon), daemon=True)
+            worker = Thread(
+                target=monitor_loop,
+                args=(None, stop_event, tray_icon, port_selection, reconnect_event),
+                daemon=True,
+            )
             worker.start()
             tray_icon.run()
             stop_event.set()
+            reconnect_event.set()
             return
 
-    monitor_loop(None, stop_event)
+    monitor_loop(None, stop_event, port_selection=port_selection)
 
 
 if __name__ == "__main__":

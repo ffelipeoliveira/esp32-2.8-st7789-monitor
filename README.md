@@ -27,6 +27,11 @@ Streams live CPU/GPU temp & load and RAM usage from a Windows PC to a
   It should start sending data to your ESP32 monitor
 
   2. ⚠ **IF IT DIDN'T WORK**:  
+  - Install [Python](https://www.python.org/ftp/python/3.15.0/python-3.15.0-amd64.exe)
+  - run `pip install pyserial`
+  - run `pip install requests`
+  - run `pip install pystray`
+  - run `pip install pillow`
   - **Double click `build_exe.bat`**  
     CMD will open, dependencies will be installed and a new monitor.exe will appear in the dist\folder
 
