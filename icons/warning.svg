@@ -1,0 +1,26 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 20010904//EN" "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
+<!-- Created using Krita: https://krita.org -->
+<svg xmlns="http://www.w3.org/2000/svg" 
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:krita="http://krita.org/namespaces/svg/krita"
+    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+    width="57.6pt"
+    height="57.6pt"
+    viewBox="0 0 57.6 57.6">
+<defs>
+  <radialGradient id="gradient0" gradientUnits="objectBoundingBox" cx="0" cy="0" fx="0" fy="0" r="1.4142135623731" spreadMethod="pad">
+   <stop stop-color="#2d2d2d" offset="0" stop-opacity="1"/>
+   <stop stop-color="#141414" offset="1" stop-opacity="1"/>
+  </radialGradient>
+  <radialGradient id="gradient1" gradientUnits="objectBoundingBox" cx="0" cy="0" fx="0" fy="0" r="1.4142135623731" spreadMethod="pad">
+   <stop stop-color="#494949" offset="0" stop-opacity="1"/>
+   <stop stop-color="#212121" offset="1" stop-opacity="1"/>
+  </radialGradient>
+  <linearGradient id="gradient2" gradientUnits="objectBoundingBox" x1="0" y1="0" x2="1" y2="1" spreadMethod="pad">
+   <stop stop-color="#4b4b4b" offset="0" stop-opacity="1"/>
+   <stop stop-color="#232323" offset="1" stop-opacity="1"/>
+  </linearGradient>
+ </defs>
+<rect id="shape0" transform="translate(-1.46999999999994, -8.75999999999991)" fill="url(#gradient0)" fill-rule="evenodd" width="48.72" height="37.44"/><rect id="shape1" transform="translate(11.2500000000001, 29.6400000000001)" fill="#121212" fill-rule="evenodd" width="24" height="13.68"/><rect id="shape2" transform="translate(-5.78999999999994, 38.2800000000001)" fill="url(#gradient1)" fill-rule="evenodd" stroke="none" stroke-width="1" stroke-linecap="square" stroke-linejoin="bevel" width="57.12" height="5.76000000000001"/><g id="group0" krita:textContourGroup="true" transform="translate(-9.50999999999989, -23.8199999999998)"><rect id="shape3" transform="translate(6.02999999999994, 13.3199999999999)" fill="none" stroke="url(#gradient2)" stroke-width="4.8" stroke-linecap="square" stroke-linejoin="bevel" width="52.32" height="41.28"/><text id="shape4" krita:textVersion="3" paint-order="stroke fill markers" fill="#fde13b" stroke-opacity="0" stroke="#000000" stroke-width="0" stroke-linecap="square" stroke-linejoin="bevel" text-anchor="middle" style="overflow: clip;shape-inside: url(#shape3);font-family: Bebas Neue;font-size: 32.28;white-space: pre-wrap;"> WRN</text></g>
+</svg>
