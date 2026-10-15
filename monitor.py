@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import time
 from threading import Event, Thread
@@ -269,6 +270,30 @@ def resolve_port(port_selection=None):
     return find_esp32_port()
 
 
+def port_settings_path():
+    app_data = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(app_data, "ESP32 Monitor", "settings.json")
+
+
+def load_port_selection():
+    try:
+        with open(port_settings_path(), encoding="utf-8") as settings_file:
+            selection = json.load(settings_file).get("port")
+        return selection if isinstance(selection, str) and selection else "AUTO"
+    except (OSError, ValueError, AttributeError):
+        return "AUTO"
+
+
+def save_port_selection(port):
+    settings_path = port_settings_path()
+    try:
+        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+        with open(settings_path, "w", encoding="utf-8") as settings_file:
+            json.dump({"port": port}, settings_file)
+    except OSError as e:
+        print(f"Could not save COM port selection: {e}")
+
+
 # ---------- Tray icon ----------
 
 def should_use_tray():
@@ -309,6 +334,7 @@ def create_tray_icon(stop_event, port_selection, reconnect_event):
     def select_port(port):
         def action(_icon, _item):
             port_selection["port"] = port
+            save_port_selection(port)
             reconnect_event.set()
         return action
 
@@ -496,7 +522,7 @@ def main():
 
     stop_event = Event()
     reconnect_event = Event()
-    selected_port = "AUTO"
+    selected_port = load_port_selection()
     if "--port" in sys.argv:
         selected_port = sys.argv[sys.argv.index("--port") + 1]
     elif SERIAL_PORT != "AUTO":
